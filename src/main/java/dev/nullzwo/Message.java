@@ -1,8 +1,8 @@
 package dev.nullzwo;
 
+import dev.nullzwo.pipe.PipeId;
+
 import java.time.Instant;
 
-public interface Message {
-    PipeId origin();
-    Instant timestamp();
+public record Message(PipeId origin, Instant timestamp) {
 }

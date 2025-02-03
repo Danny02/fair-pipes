@@ -18,7 +18,7 @@ public class App {
         var simulation = new Simulation();
         Runtime.getRuntime().addShutdownHook(new Thread(simulation::stop));
 
-        simulation.run();
+        simulation.runDynamicThrottledFlow();
 
         System.out.println("Everything running.");
     }

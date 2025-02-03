@@ -18,6 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
+  "id": 1,
   "links": [],
   "panels": [
     {
@@ -88,6 +89,7 @@
         "y": 0
       },
       "id": 1,
+      "interval": "1ms",
       "options": {
         "legend": {
           "calcs": [],
@@ -109,7 +111,8 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(rate(messages_appended_total[$__rate_interval])) by (pipe)",
+          "expr": "sum(rate(messages_appended_total[2s])) by (pipe)",
+          "hide": false,
           "instant": false,
           "interval": "1s",
           "legendFormat": "__auto",
@@ -204,7 +207,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(messages_read_total[$__rate_interval])) by (pipe)",
+          "expr": "sum(rate(messages_read_total[2s])) by (pipe)",
           "interval": "1s",
           "legendFormat": "__auto",
           "range": true,
@@ -363,7 +366,8 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(messages_read_latency_total{pipe=\"output\"}[$__rate_interval]) / rate(messages_read_total[$__rate_interval])",
+          "expr": "rate(messages_read_latency_total{pipe=\"outflow\"}[2s]) / rate(messages_read_total[2s])",
+          "interval": "1s",
           "legendFormat": "{{origin}}",
           "range": true,
           "refId": "A"
@@ -381,12 +385,13 @@
     "list": []
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-1m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Flows",
-  "version": 0,
+  "uid": "cebnpd2nbcv7kb",
+  "version": 1,
   "weekStart": ""
 }

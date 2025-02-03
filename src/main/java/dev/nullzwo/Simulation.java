@@ -1,140 +1,201 @@
 package dev.nullzwo;
 
+import dev.nullzwo.flow.PriotizedRoundRobinFlow;
+import dev.nullzwo.flow.RateLimitedFlow;
+import dev.nullzwo.flow.RoundRobinFlow;
+import dev.nullzwo.pipe.InMemPipe;
+import dev.nullzwo.pipe.MetricSinkPipe;
+import dev.nullzwo.pipe.MetricSourcePipe;
+import dev.nullzwo.pipe.PipeId;
+import dev.nullzwo.pipe.SinkPipe;
+import dev.nullzwo.pipe.SourcePipe;
 import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.metrics.LongCounter;
-import io.opentelemetry.api.metrics.LongGauge;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.opentelemetry.api.common.AttributeKey.stringKey;
 import static java.time.Duration.ofSeconds;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class Simulation {
-    private final ThroughputReconciliation throughputReconciliation;
+    private static final Logger log = LoggerFactory.getLogger(Simulation.class);
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(10);
     private final List<ScheduledFuture<?>> jobs = new ArrayList<>();
-    private final List<Stopable> flows = new ArrayList<>();
+    private final List<Flow> flows = new ArrayList<>();
 
-    public Simulation() {
-        this.throughputReconciliation = new ThroughputReconciliation();
+    public void runDynamicThrottledFlow() {
+        var slowId = new PipeId("slow-inflow");
+        var slowInflow = new InMemPipe(slowId);
+        var fastId = new PipeId("fast-inflow");
+        var fastInflow = new InMemPipe(fastId);
+        var outflow = new InMemPipe(new PipeId("outflow"));
+
+        meassureLag(slowInflow, fastInflow, outflow);
+        startScenario(slowInflow, fastInflow, outflow);
+        var flow = new RateLimitedFlow(outflow, slowInflow, fastInflow);
+        runFlow(flow);
+
+        AtomicInteger rate = new AtomicInteger(10);
+
+        scheduler.schedule(() -> {
+            if(outflow.size() == 0 && (slowInflow.size() > 0 || fastInflow.size() > 0)) {
+                rate.incrementAndGet();
+                log.info("Increment rate: {}", rate.get());
+            } else if(outflow.size() > 10) {
+                rate.decrementAndGet();
+                log.info("Decrement rate: {}", rate.get());
+            }
+        }, 2, SECONDS);
+
+        scheduler.schedule(() -> {
+            if(slowInflow.size() == 0) {
+                flow.configure(fastId, new Throughput(rate.get(), ofSeconds(1)));
+            } else if(fastInflow.size() == 0) {
+                flow.configure(slowId, new Throughput(rate.get(), ofSeconds(1)));
+            } else {
+                flow.configure(slowId, new Throughput(rate.get() / 2, ofSeconds(1)));
+                flow.configure(fastId, new Throughput(rate.get() / 2, ofSeconds(1)));
+            }
+        }, 100, MILLISECONDS);
     }
 
-    public void run() {
-        var id1 = new PipeId("input_1");
-        var input1 = new SimulatedPipe(id1);
-        var id2 = new PipeId("input_2");
-        var input2 = new SimulatedPipe(id2);
+    public void runThrottledFlow() {
+        var slowId = new PipeId("slow-inflow");
+        var slowInflow = new InMemPipe(slowId);
+        var fastId = new PipeId("fast-inflow");
+        var fastInflow = new InMemPipe(fastId);
+        var outflow = new InMemPipe(new PipeId("outflow"));
 
-        var output = new SimulatedPipe(new PipeId("output"));
+        meassureLag(slowInflow, fastInflow, outflow);
+        startScenario(slowInflow, fastInflow, outflow);
+        var flow = new RateLimitedFlow(outflow, slowInflow, fastInflow);
+        flow.configure(slowId, new Throughput(5, ofSeconds(1)));
+        flow.configure(fastId, new Throughput(5, ofSeconds(1)));
+        runFlow(flow);
+    }
 
+    public void runRoundRobinFlow() {
+        var slowInflow = new InMemPipe(new PipeId("slow-inflow"));
+        var fastInflow = new InMemPipe(new PipeId("fast-inflow"));
+        var outflow = new InMemPipe(new PipeId("outflow"));
 
-        schedule(new Throughput(1, ofSeconds(5)), () -> input1.consume(new SimMessage(id1, Instant.now())));
-        schedule(new Throughput(20, ofSeconds(1)), () -> input2.consume(new SimMessage(id2, Instant.now())));
-        schedule(new Throughput(10, ofSeconds(1)), output::nextMessage);
-        System.out.println("scheduled jobs");
+        meassureLag(slowInflow, fastInflow, outflow);
+        startScenario(slowInflow, fastInflow, outflow);
+        runFlow(new RoundRobinFlow(outflow, outflow, slowInflow, fastInflow));
+    }
 
-        var flow = new RoundRobinFlow(output, input1, input2);
+    public void runPriotizedRoundRobinFlow() {
+        var slowInflow = new InMemPipe(new PipeId("slow-inflow"));
+        var fastInflow = new InMemPipe(new PipeId("fast-inflow"));
+        var outflow = new InMemPipe(new PipeId("outflow"));
+
+        meassureLag(slowInflow, fastInflow, outflow);
+        startScenario(slowInflow, fastInflow, outflow);
+        runFlow(new PriotizedRoundRobinFlow(outflow, outflow, slowInflow, fastInflow));
+    }
+
+    public void runKafkaFlow() {
+        var kafkaFactory = new KafkaFactory("localhost:9092");
+
+        var slowInflow = kafkaFactory.createSource("slow-inflow");
+        var slowInflowSink = kafkaFactory.createSink("slow-inflow");
+
+        var fastInflow = kafkaFactory.createSource("fast-inflow");
+        var fastInflowSink = kafkaFactory.createSink("fast-inflow");
+
+        var outflow = kafkaFactory.createSink("outflow");
+        var outflowSource = kafkaFactory.createSource("outflow");
+
+        meassureLag(slowInflow, fastInflow, outflowSource);
+        startScenario(slowInflowSink, fastInflowSink, outflowSource);
+        runFlow(new RoundRobinFlow(outflow, outflowSource, slowInflow, fastInflow));
+    }
+
+    public void runStreamsFlow() {
+        var kafkaFactory = new KafkaFactory("localhost:9092");
+
+        var slowInflow = kafkaFactory.createSource("slow-inflow");
+        var slowInflowSink = kafkaFactory.createSink("slow-inflow");
+
+        var fastInflow = kafkaFactory.createSource("fast-inflow");
+        var fastInflowSink = kafkaFactory.createSink("fast-inflow");
+
+        var outflow = kafkaFactory.createSink("outflow");
+        var outflowSource = kafkaFactory.createSource("outflow");
+
+        meassureLag(slowInflow, fastInflow, outflowSource);
+        startScenario(slowInflowSink, fastInflowSink, outflowSource);
+        runFlow(kafkaFactory.createFlow(outflow, slowInflow, fastInflow));
+    }
+
+    private void runFlow(Flow flow) {
+        log.info("Starting flow: {}", flow.describe());
         flows.add(flow);
-
         scheduler.execute(flow::run);
-        System.out.println("started flows");
+        log.info("Flow started: {}", flow.describe());
+    }
+
+    private void startScenario(SinkPipe slowInflow, SinkPipe fastInflow, SourcePipe outflow) {
+        simulateBurstInflow(slowInflow, new Throughput(80, ofSeconds(20)));
+        simulateConstInflow(fastInflow, new Throughput(6, ofSeconds(1)));
+        drain(outflow, new Throughput(10, ofSeconds(1)));
+        log.info("scheduled simulation jobs");
+    }
+
+    private void simulateConstInflow(SinkPipe sinkPipe, Throughput throughput) {
+        var pipe = new MetricSinkPipe(sinkPipe);
+        schedule(throughput, () -> pipe.consume(new Message(sinkPipe.id(), Instant.now())));
+    }
+
+    private void simulateBurstInflow(SinkPipe sinkPipe, Throughput throughput) {
+        var pipe = new MetricSinkPipe(sinkPipe);
+        var nanos = throughput.duration().toNanos();
+        jobs.add(scheduler.scheduleAtFixedRate(
+                () -> {
+                    for (int i = 0; i < throughput.messageCount(); i++) {
+                        pipe.consume(new Message(sinkPipe.id(), Instant.now()));
+                    }
+                }, nanos, nanos, NANOSECONDS));
+    }
+
+    private void drain(SourcePipe outflow, Throughput throughput) {
+        var pipe = new MetricSourcePipe<>(outflow);
+        schedule(throughput, pipe::tryNextMessage);
+    }
+
+    private void meassureLag(QueueLength... lengths) {
+        for (var len : lengths) {
+            App.METER.gaugeBuilder("messages_queued").ofLongs().buildWithCallback(m -> {
+                m.record(len.size(), Attributes.of(stringKey("pipe"), len.id().id()));
+            });
+        }
     }
 
     public void stop() {
         for (var flow : flows) {
+            log.info("Stopping flow: {}", flow.describe());
             flow.stop();
+            log.info("Stopped flow: {}", flow.describe());
         }
-        System.out.println("stopped flows");
         for (var job : jobs) {
             job.cancel(true);
         }
-        System.out.println("stopped jobs");
+        log.info("stopped jobs");
         scheduler.shutdownNow();
     }
 
     private void schedule(Throughput throughput, Runnable runnable) {
         var nsPerOp = throughput.duration().toNanos() / throughput.messageCount();
         jobs.add(scheduler.scheduleAtFixedRate(runnable, 0, nsPerOp, NANOSECONDS));
-    }
-
-    public static class SimulatedPipe implements SourcePipe, SinkPipe {
-        private static final LongGauge MESSAGE_COUNT = App.METER.gaugeBuilder("messages_queued")
-                                                                .ofLongs().build();
-        private static final LongCounter READ_MESSAGES = App.METER.counterBuilder("messages_read_total").build();
-        private static final LongCounter READ_LATENCY_MESSAGES = App.METER.counterBuilder("messages_read_latency")
-                                                                          .build();
-        private static final LongCounter APPENDED_MESSAGES = App.METER.counterBuilder("messages_appended_total")
-                                                                      .build();
-
-        private final PipeId id;
-        private final Attributes attributes;
-        private final ConcurrentLinkedQueue<Message> messages = new ConcurrentLinkedQueue<>();
-
-        public SimulatedPipe(PipeId id) {
-            this.id = id;
-            attributes = Attributes.of(stringKey("pipe"), id.id());
-        }
-
-        @Override
-        public PipeId id() {
-            return id;
-        }
-
-        @Override
-        public void consume(Message message) {
-            messages.add(message);
-            updateMetrics();
-            APPENDED_MESSAGES.add(1, attributes);
-        }
-
-        @Override
-        public int enqueued() {
-            return messages.size();
-        }
-
-        @Override
-        public Message nextMessage() {
-            Optional<Message> msg;
-            while((msg = tryNextMessage()).isEmpty()) {
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-            return msg.get();
-        }
-
-        @Override
-        public Optional<Message> tryNextMessage() {
-            if(messages.isEmpty()) {
-                return Optional.empty();
-            }
-
-            var msg = messages.poll();
-
-            updateMetrics();
-            var withOrigin = attributes.toBuilder().put("origin", msg.origin().id()).build();
-            READ_MESSAGES.add(1, withOrigin);
-            var latency = msg.timestamp().until(Instant.now()).toMillis();
-            READ_LATENCY_MESSAGES.add(latency, withOrigin);
-
-            return Optional.of(msg);
-        }
-
-        private void updateMetrics() {
-            MESSAGE_COUNT.set(messages.size(), attributes);
-        }
-    }
-
-    public record SimMessage(PipeId origin, Instant timestamp) implements Message {
     }
 }

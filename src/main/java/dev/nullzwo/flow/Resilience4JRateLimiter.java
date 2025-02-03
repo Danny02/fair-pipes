@@ -1,26 +1,29 @@
-package dev.nullzwo;
+package dev.nullzwo.flow;
 
+import dev.nullzwo.Throughput;
 import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 
 import java.time.Duration;
 
 import static io.github.resilience4j.ratelimiter.RateLimiterConfig.custom;
+import static java.time.Duration.ofMillis;
 import static java.time.Duration.ofSeconds;
 
 public class Resilience4JRateLimiter implements RateLimiter {
 
-    private final io.github.resilience4j.ratelimiter.RateLimiter rateLimiterDelegate;
+    public static final Duration REFRESH_PERIOD = ofMillis(200);
+    private final io.github.resilience4j.ratelimiter.RateLimiter inner;
 
     public Resilience4JRateLimiter() {
-        RateLimiterRegistry rateLimiterRegistry = RateLimiterRegistry.of(
+        var rateLimiterRegistry = RateLimiterRegistry.of(
                 custom()
-                        .limitRefreshPeriod(ofSeconds(1))
+                        .limitRefreshPeriod(REFRESH_PERIOD)
                         .limitForPeriod(Integer.MAX_VALUE)
                         .timeoutDuration(ofSeconds(10))
                         .build()
         );
-        this.rateLimiterDelegate = rateLimiterRegistry.rateLimiter("rateLimiter");
+        inner = rateLimiterRegistry.rateLimiter("rateLimiter");
     }
 
     /**
@@ -32,7 +35,7 @@ public class Resilience4JRateLimiter implements RateLimiter {
     @Override
     public void runWithRateLimit(Runnable runnable) {
         try {
-            rateLimiterDelegate.executeRunnable(runnable);
+            inner.executeRunnable(runnable);
         } catch (RequestNotPermitted exception) {
             throw new RuntimeException(exception);
         }
@@ -40,7 +43,8 @@ public class Resilience4JRateLimiter implements RateLimiter {
 
     @Override
     public void configure(Throughput throughput) {
-        var countPerSecond = (int)(throughput.messageCount() * (throughput.duration().toMillis() / 1000.0));
-        rateLimiterDelegate.changeLimitForPeriod(countPerSecond);
+        var countPerSecond = (int) (throughput.messageCount() *
+                                    (throughput.duration().toMillis() / (double) REFRESH_PERIOD.toMillis()));
+        inner.changeLimitForPeriod(countPerSecond);
     }
 }
